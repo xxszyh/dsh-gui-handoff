@@ -1,43 +1,35 @@
 {
-  "name": "dsh-gui-handoff",
-  "version": "0.1.0",
-  "description": "A DeepSeek Harness skill that hands a command-line-verified task over to the user's GUI: it drives the interface once itself, verifies with ground truth, and produces a self-contained illustrated tutorial the human can follow. / 把命令行验证过的操作交接给图形界面：自己驱动一遍、用地面真值验证，并产出人能照着做的自包含带图教程。",
-  "type": "module",
-  "main": "lib/index.js",
-  "license": "MIT",
-  "keywords": [
-    "deepseek",
-    "harness",
-    "dsh",
-    "dsh-plugin",
-    "skill",
-    "gui",
-    "automation",
-    "windows",
-    "tutorial"
-  ],
-  "files": [
-    "lib",
-    "skills",
-    "cordis.patch.yml",
-    "README.md",
-    "LICENSE"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": {
-      "optional": true
-    }
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/xxszyh/dsh-gui-handoff.git"
-  }
+    "name":  "dsh-gui-handoff",
+    "version":  "0.1.0",
+    "description":  "A DeepSeek Harness skill that hands a command-line-verified task over to the user\u0027s GUI: it drives the interface once itself, verifies with ground truth, and produces a self-contained illustrated tutorial the human can follow. / 把命令行验证过的操作交接给图形界面：自己驱动一遍、用地面真值验证，并产出人能照着做的自包含带图教程。",
+    "type":  "module",
+    "main":  "lib/index.js",
+    "license":  "MIT",
+    "keywords":  [
+                     "deepseek",
+                     "harness",
+                     "dsh",
+                     "dsh-plugin",
+                     "skill",
+                     "gui",
+                     "automation",
+                     "windows",
+                     "tutorial"
+                 ],
+    "files":  [
+                  "lib",
+                  "skills",
+                  "cordis.patch.yml",
+                  "README.md",
+                  "LICENSE"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           }
+            },
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/xxszyh/dsh-gui-handoff.git"
+                   }
 }
