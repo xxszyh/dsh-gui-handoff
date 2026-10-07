@@ -85,6 +85,43 @@ dsh plugin --profile <your-profile> add /path/to/dsh-gui-handoff
 The plugin registers one skill (`gui-handoff`, rank 600 — lowest priority, so a
 locally edited copy in your project or user skills directory always wins).
 
+### Windows driver setup and checks
+
+Python 3.11 or newer is required for the reference driver. Capture and input use
+only the standard library; the optional read_region tool requires Pillow:
+
+~~~sh
+python -m pip install Pillow
+python tools/gui-control/server.py
+~~~
+
+Configure your MCP host to launch that command with the checkout/package's
+absolute path. It speaks newline-delimited JSON-RPC on stdio; diagnostics go to
+stderr. Version 0.1.1 fixes pointer-sized Win32 handles, virtual-key Enter/Tab,
+input failure reporting, and malformed-request handling. Input arguments are
+validated before dispatch, and text to be typed is omitted from diagnostic logs.
+
+Before taking control, run the countdown notice as a separate PowerShell process.
+**Proceed only if its exit code is 0. Exit code 2 means the user cancelled.**
+The notice is not automatically invoked by this reference server; the caller
+must enforce this gate. The focus_window tool now fails if foreground focus
+cannot be confirmed, so the caller must stop rather than typing into another window.
+
+~~~powershell
+powershell.exe -NoProfile -File tools/notify-takeover.ps1 -Task 'GUI walkthrough' -Seconds 3
+if ($LASTEXITCODE -ne 0) { throw 'Takeover cancelled' }
+~~~
+
+Maintenance checks:
+
+~~~sh
+npm test
+python -m unittest discover -s tests -v
+~~~
+
+The Windows tests mock keyboard injection. Their live checks only enumerate
+windows and read cursor information; they do not click or type into your apps.
+
 ### What ships
 
 ```
@@ -178,6 +215,20 @@ dsh plugin --profile <你的 profile> add /path/to/dsh-gui-handoff
 
 插件注册一个 skill（`gui-handoff`，rank 600 —— 最低优先级，因此你在项目或用户
 技能目录里本地改过的同名副本总是优先）。
+
+### Windows 工具维护
+
+参考驱动需要 Python 3.11+；截图和输入使用标准库，read_region 另需安装 Pillow。
+控制工具和提示脚本现已包含在安装包中。
+
+0.1.1 修复了 64 位窗口句柄、回车/Tab 注入、输入失败误报成功、异常请求导致
+服务退出等问题。自动化调用者必须先运行接管提示，**只有退出码 0 才能继续；
+退出码 2 表示用户取消**。参考 server 不会自动启动提示，需要调用者执行此检查。
+聚焦目标窗口失败时工具会报错，调用者应停止输入。
+
+运行 npm test 检查插件与安装包；Windows 上再运行
+python -m unittest discover -s tests -v 检查协议、按键结构与 PNG。
+测试不会向桌面注入按键或点击鼠标。
 
 ### 目录
 

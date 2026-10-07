@@ -1,10 +1,14 @@
 {
     "name":  "dsh-gui-handoff",
-    "version":  "0.1.0",
+    "version":  "0.1.1",
     "description":  "A DeepSeek Harness skill that hands a command-line-verified task over to the user\u0027s GUI: it drives the interface once itself, verifies with ground truth, and produces a self-contained illustrated tutorial the human can follow. / 把命令行验证过的操作交接给图形界面：自己驱动一遍、用地面真值验证，并产出人能照着做的自包含带图教程。",
     "type":  "module",
     "main":  "lib/index.js",
     "license":  "MIT",
+    "scripts": {
+        "test": "node --test tests/provider.test.js",
+        "test:windows": "python -m unittest discover -s tests -v"
+    },
     "keywords":  [
                      "deepseek",
                      "harness",
@@ -19,6 +23,8 @@
     "files":  [
                   "lib",
                   "skills",
+                  "tools/gui-control/server.py",
+                  "tools/notify-takeover.ps1",
                   "cordis.patch.yml",
                   "README.md",
                   "LICENSE"

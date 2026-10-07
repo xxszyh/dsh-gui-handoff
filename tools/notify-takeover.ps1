@@ -32,6 +32,7 @@
 param(
     [string]$Task    = 'GUI 自动化',
     [int]   $Steps   = 0,
+    [ValidateRange(1, 60)]
     [int]   $Seconds = 3
 )
 
@@ -63,10 +64,23 @@ $Seconds 秒后开始 —— 现在把鼠标移开，或直接关掉这个窗口
 "@
 
 $form.Controls.Add($label)
+$form.Tag = $false
 
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = $Seconds * 1000
-$timer.Add_Tick({ $timer.Stop(); $form.Close() })
+$timer.Add_Tick({ $form.Tag = $true; $timer.Stop(); $form.Close() })
 $timer.Start()
 
-[void]$form.ShowDialog()
+try {
+    [void]$form.ShowDialog()
+    $completed = [bool]$form.Tag
+}
+finally {
+    $timer.Stop()
+    $timer.Dispose()
+    $form.Dispose()
+}
+
+# Callers must check this before injecting input: closing the notice cancels.
+if ($completed) { exit 0 }
+exit 2
