@@ -117,6 +117,74 @@ class ServerTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 server.type_text("a")
 
+    def test_target_mismatch_refuses_input_without_moving_cursor(self):
+        with patch.object(server.user32, "IsWindow", return_value=True), \
+                patch.object(server.user32, "GetForegroundWindow", return_value=456), \
+                patch.object(server.user32, "SetCursorPos") as cursor, \
+                patch.object(server, "_send_input") as send:
+            for name, arguments in (
+                ("type_text", {"text": "private", "hwnd": 123}),
+                ("press_key", {"keys": "enter", "hwnd": 123}),
+                ("click", {"x": 10, "y": 10, "hwnd": 123}),
+            ):
+                with self.assertRaises(OSError):
+                    server.dispatch(name, arguments)
+            send.assert_not_called()
+            cursor.assert_not_called()
+
+    def test_click_rechecks_focus_after_cursor_move(self):
+        with patch.object(server.user32, "IsWindow", return_value=True), \
+                patch.object(server.user32, "GetForegroundWindow", side_effect=[123, 456]), \
+                patch.object(server.user32, "WindowFromPoint", return_value=789), \
+                patch.object(server.user32, "GetAncestor", return_value=123), \
+                patch.object(server.user32, "SetCursorPos", return_value=True), \
+                patch.object(server, "_send_input") as send:
+            with self.assertRaises(OSError):
+                server.click(10, 10, hwnd=123)
+            send.assert_not_called()
+
+    def test_click_outside_target_is_rejected(self):
+        with patch.object(server.user32, "IsWindow", return_value=True), \
+                patch.object(server.user32, "GetForegroundWindow", return_value=123), \
+                patch.object(server.user32, "WindowFromPoint", return_value=456), \
+                patch.object(server.user32, "GetAncestor", return_value=456), \
+                patch.object(server.user32, "SetCursorPos") as cursor, \
+                patch.object(server, "_send_input") as send:
+            with self.assertRaises(OSError):
+                server.click(10, 10, hwnd=123)
+            send.assert_not_called()
+            cursor.assert_not_called()
+
+    def test_read_region_failure_is_mcp_tool_error(self):
+        replies, _ = self.exchange([
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "read_region", "arguments": {"image_path": "Z:/missing.png"}}}),
+        ])
+        self.assertTrue(replies[0]["result"]["isError"])
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "optional Pillow crop support")
+    def test_read_region_integer_pixels_and_fractional_coordinates(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            output = Path(directory) / "crop.png"
+            image = Image.new("RGB", (10, 10), "red")
+            image.putpixel((1, 1), (0, 255, 0))
+            image.save(source)
+            image.close()
+            result = json.loads(server.read_region(str(source), x=1, y=1, w=1, h=1,
+                                                   scale=1, out_path=str(output)))
+            self.assertEqual(result["region"], [1, 1, 2, 2])
+            with Image.open(output) as crop:
+                self.assertEqual(crop.size, (1, 1))
+                self.assertEqual(crop.getpixel((0, 0)), (0, 255, 0))
+            result = json.loads(server.read_region(str(source), x=0.5, y=0.5, w=0.5, h=0.5,
+                                                   scale=1, out_path=str(output)))
+            self.assertEqual(result["region"], [5, 5, 10, 10])
+            for arguments in ({"scale": -1}, {"w": 0}, {"scale": float("nan")}):
+                with self.assertRaises(ValueError):
+                    server.read_region(str(source), **arguments)
+
     def test_screenshot_deselects_bitmap_and_cleans_up_on_readback_failure(self):
         def rect(hwnd, output):
             target = ctypes.cast(output, ctypes.POINTER(server.RECT)).contents

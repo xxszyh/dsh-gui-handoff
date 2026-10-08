@@ -28,6 +28,7 @@ gui-control —— 最小 MCP server（stdio / JSON-RPC 2.0），用于 Windows 
 import sys
 import os
 import json
+import math
 import time
 import zlib
 import struct
@@ -216,12 +217,33 @@ def screenshot_window(hwnd, path):
     return path
 
 
-def click(x, y):
-    user32.SetCursorPos(int(x), int(y))
+def _require_foreground(hwnd):
+    if hwnd is not None:
+        if not user32.IsWindow(hwnd) or user32.GetForegroundWindow() != hwnd:
+            raise OSError("目标窗口已失去焦点；未发送输入。请重新确认目标窗口。")
+
+
+def click(x, y, hwnd=None):
+    _require_foreground(hwnd)
+    if hwnd is not None:
+        hit = user32.WindowFromPoint(wt.POINT(int(x), int(y)))
+        if not hit or user32.GetAncestor(hit, 2) != hwnd:  # GA_ROOT
+            raise OSError("点击坐标不属于目标窗口；未发送输入。")
+    if not user32.SetCursorPos(int(x), int(y)):
+        raise ctypes.WinError(ctypes.get_last_error())
     time.sleep(0.05)
-    user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
-    time.sleep(0.03)
-    user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+    _require_foreground(hwnd)
+    if hwnd is not None:
+        hit = user32.WindowFromPoint(wt.POINT(int(x), int(y)))
+        if not hit or user32.GetAncestor(hit, 2) != hwnd:
+            raise OSError("点击位置已被其他窗口覆盖；未发送输入。")
+    events = []
+    for flag in (0x0002, 0x0004):  # LEFTDOWN / LEFTUP
+        event = INPUT()
+        event.type = 0  # INPUT_MOUSE
+        event.u.mi = MOUSEINPUT(0, 0, 0, flag, 0, 0)
+        events.append(event)
+    _send_input(events)
     return "已点击 (%d, %d)" % (int(x), int(y))
 
 
@@ -293,6 +315,9 @@ for dll, function, arguments, result in [
     (user32, "PrintWindow", [wt.HWND, wt.HDC, wt.UINT], wt.BOOL),
     (user32, "ShowWindow", [wt.HWND, ctypes.c_int], wt.BOOL),
     (user32, "SetForegroundWindow", [wt.HWND], wt.BOOL),
+    (user32, "SetCursorPos", [ctypes.c_int, ctypes.c_int], wt.BOOL),
+    (user32, "WindowFromPoint", [wt.POINT], wt.HWND),
+    (user32, "GetAncestor", [wt.HWND, wt.UINT], wt.HWND),
     (user32, "SendInput", [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int], wt.UINT),
     (user32, "MapVirtualKeyW", [wt.UINT, wt.UINT], wt.UINT),
     (gdi32, "CreateCompatibleDC", [wt.HDC], wt.HDC),
@@ -357,7 +382,7 @@ def _send_input(inputs):
     return sent
 
 
-def type_text(text):
+def type_text(text, hwnd=None):
     """以 Unicode 码元注入文本，绕过 IME。\\n 与 \\t 按虚拟键处理。"""
     inputs = []
     for ch in text:
@@ -372,11 +397,12 @@ def type_text(text):
             unit = int.from_bytes(raw[i:i + 2], "little")
             inputs += [_kbd(unit, KEYEVENTF_UNICODE),
                        _kbd(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]
+    _require_foreground(hwnd)
     sent = _send_input(inputs)
     return "已注入 %d 个字符 / %d 个输入事件" % (len(text), sent)
 
 
-def press_key(combo, mode="scan"):
+def press_key(combo, mode="scan", hwnd=None):
     """按组合键：'enter' / 'ctrl+s' / 'alt+f4' / 'f5' / 'ctrl+shift+p'。
 
     mode:
@@ -408,6 +434,7 @@ def press_key(combo, mode="scan"):
         return _kbd(sc, flags)
 
     inputs = [one(vk, False) for vk in vks] + [one(vk, True) for vk in reversed(vks)]
+    _require_foreground(hwnd)
     _send_input(inputs)
     return "已按键: %s (%s 模式)" % (combo, mode)
 
@@ -450,11 +477,19 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     """
     try:
         from PIL import Image
-    except ImportError:
-        return "ERROR: 需要 Pillow（pip install pillow）才能裁剪放大"
+    except ImportError as error:
+        raise RuntimeError("需要 Pillow（pip install pillow）才能裁剪放大") from error
 
     if not os.path.exists(image_path):
-        return "ERROR: 图片不存在: %s" % image_path
+        raise FileNotFoundError(image_path)
+
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("scale 必须是正的有限数")
+    for value in (x, y, w, h):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("裁剪坐标必须是有限数")
+    if (w is not None and w <= 0) or (h is not None and h <= 0):
+        raise ValueError("裁剪宽高必须为正数")
 
     im = Image.open(image_path)
     W, H = im.size
@@ -462,8 +497,7 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     def px(v, total, default):
         if v is None:
             return default
-        v = float(v)
-        return int(round(v * total)) if 0.0 <= v <= 1.0 else int(round(v))
+        return int(round(v * total)) if type(v) is float and 0.0 <= v <= 1.0 else int(round(v))
 
     x0 = px(x, W, 0)
     y0 = px(y, H, 0)
@@ -475,9 +509,14 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     x1 = max(x0 + 1, min(x1, W))
     y1 = max(y0 + 1, min(y1, H))
 
-    crop = im.crop((x0, y0, x1, y1))
+    try:
+        crop = im.crop((x0, y0, x1, y1))
+    finally:
+        im.close()
     if scale and scale != 1:
-        crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
+        resized = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.LANCZOS)
+        crop.close()
+        crop = resized
 
     if not out_path:
         base, ext = os.path.splitext(image_path)
@@ -485,7 +524,10 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     d = os.path.dirname(out_path)
     if d and not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
-    crop.save(out_path)
+    try:
+        crop.save(out_path)
+    finally:
+        crop.close()
 
     return json.dumps({
         "out_path": out_path,
@@ -534,6 +576,7 @@ TOOLS = [
             "properties": {
                 "x": {"type": "integer"},
                 "y": {"type": "integer"},
+                "hwnd": {"type": "integer", "description": "可选目标顶层句柄；焦点或点击目标不匹配时拒绝操作"},
             },
             "required": ["x", "y"],
             "additionalProperties": False,
@@ -554,7 +597,10 @@ TOOLS = [
         "description": "向当前焦点窗口注入文本。使用 SendInput + KEYEVENTF_UNICODE，绕过中文输入法（IME），不会把英文转成中文。支持中文与任意 Unicode。",
         "inputSchema": {
             "type": "object",
-            "properties": {"text": {"type": "string", "description": "要输入的文本；\\n 会按回车处理"}},
+            "properties": {
+                "text": {"type": "string", "description": "要输入的文本；\\n 会按回车处理"},
+                "hwnd": {"type": "integer", "description": "可选目标顶层句柄；焦点不匹配时拒绝输入"},
+            },
             "required": ["text"],
             "additionalProperties": False,
         },
@@ -587,6 +633,7 @@ TOOLS = [
             "properties": {
                 "keys": {"type": "string", "description": "按键或组合键，用 + 连接"},
                 "mode": {"type": "string", "enum": ["scan", "vk"], "default": "scan"},
+                "hwnd": {"type": "integer", "description": "可选目标顶层句柄；焦点不匹配时拒绝输入"},
             },
             "required": ["keys"],
             "additionalProperties": False,
@@ -612,6 +659,8 @@ def dispatch(name, args):
                  or (expected == "number" and type(value) in (int, float)))
         if not valid or ("enum" in properties[key] and value not in properties[key]["enum"]):
             raise ValueError("工具参数类型或取值无效: %s" % key)
+        if expected == "number" and not math.isfinite(value):
+            raise ValueError("工具数值参数必须是有限数")
     if name == "list_windows":
         return json.dumps(list_windows(), ensure_ascii=False, indent=1)
     if name == "screen_info":
@@ -624,13 +673,13 @@ def dispatch(name, args):
     if name == "screenshot_window":
         return screenshot_window(args.get("hwnd"), args["path"])
     if name == "click":
-        return click(args["x"], args["y"])
+        return click(args["x"], args["y"], args.get("hwnd"))
     if name == "focus_window":
         return focus_window(args["hwnd"])
     if name == "type_text":
-        return type_text(args["text"])
+        return type_text(args["text"], args.get("hwnd"))
     if name == "press_key":
-        return press_key(args["keys"], args.get("mode", "scan"))
+        return press_key(args["keys"], args.get("mode", "scan"), args.get("hwnd"))
     if name == "read_region":
         return read_region(
             args["image_path"],

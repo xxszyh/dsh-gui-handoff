@@ -20,12 +20,13 @@ test("registers the skill with its body and resource directory", async () => {
 	assert.equal(skill.resourceBase.kind, "directory");
 });
 
-test("the installable package contains both advertised Windows tools", () => {
+test("the installable package contains the Windows driver, notice and acceptance check", () => {
 	const [pack] = JSON.parse(execSync("npm pack --dry-run --json", {
 		cwd: root, encoding: "utf8"
 	}));
 	const paths = new Set(pack.files.map(file => file.path));
 	assert.ok(paths.has("tools/gui-control/server.py"));
+	assert.ok(paths.has("tools/gui-control/selftest.py"));
 	assert.ok(paths.has("tools/notify-takeover.ps1"));
 	assert.ok(paths.has("skills/gui-handoff/SKILL.md"));
 	assert.ok(!paths.has("tests/provider.test.js"));

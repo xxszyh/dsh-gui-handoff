@@ -24,6 +24,7 @@
                   "lib",
                   "skills",
                   "tools/gui-control/server.py",
+                  "tools/gui-control/selftest.py",
                   "tools/notify-takeover.ps1",
                   "cordis.patch.yml",
                   "README.md",
