@@ -143,6 +143,10 @@ belongs to that window before and after moving the cursor. These checks reduce
 stale-focus mistakes; they do not lock foreground focus against concurrent changes.
 read_region treats integers as pixels and floats from 0 to 1 as fractions, and
 returns an MCP error for missing images/dependencies or invalid geometry.
+It refuses to overwrite the source image, including hardlink/path aliases, and
+rejects regions with no source pixels. For non-integer resizing, effective_scale
+reports each axis's actual output/source ratio; coordinate mapping uses those
+ratios rather than the requested upscale value.
 
 ### What ships
 
@@ -267,6 +271,9 @@ python tools/gui-control/selftest.py --output .local/desktop-check
 给输入工具传入已核实的 hwnd，可在焦点不匹配时拒绝操作；点击还会检查坐标是否
 属于目标窗口。核对与注入之间仍可能发生焦点变化，不是前台锁。read_region 的
 整数表示像素、0～1 浮点数表示比例，缺图、依赖缺失和非法参数均按工具错误返回。
+裁剪拒绝覆盖原图（含路径及硬链接别名），完全越界或不足一像素的区域也会报错。
+非整数缩放应使用 effective_scale 的实际两轴比例换算坐标，upscale 仍记录请求值。
+见[裁剪修复与验收](https://github.com/xxszyh/dsh-gui-handoff/blob/codex/gui-control-maintenance/docs/crop-coordinate-maintenance-2026-10-08.md)。
 
 ### 目录
 

@@ -22,6 +22,47 @@ if sys.platform == "win32":
 
 @unittest.skipUnless(sys.platform == "win32", "Windows GUI reference driver")
 class ServerTests(unittest.TestCase):
+    def test_crop_cannot_overwrite_its_source_or_a_hardlink_alias(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (7, 5), color="red").save(source)
+            original = source.read_bytes()
+            for output in (source, source.parent / ".." / source.parent.name / source.name):
+                with self.assertRaisesRegex(ValueError, "原图|source"):
+                    server.read_region(str(source), scale=2, out_path=str(output))
+                self.assertEqual(source.read_bytes(), original)
+            alias = source.with_name("alias.png")
+            alias.hardlink_to(source)
+            with self.assertRaisesRegex(ValueError, "原图|source"):
+                server.read_region(str(source), scale=2, out_path=str(alias))
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_crop_reports_effective_axis_scales_after_integer_resize(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (7, 5), color="red").save(source)
+            report = json.loads(server.read_region(str(source), scale=1.5))
+            self.assertEqual(report["region_size"], [7, 5])
+            self.assertEqual(report["out_size"], [10, 7])
+            self.assertEqual(report["effective_scale"], [10 / 7, 7 / 5])
+            sx, sy = report["effective_scale"]
+            self.assertAlmostEqual(10 / sx, 7)
+            self.assertAlmostEqual(7 / sy, 5)
+            self.assertNotIn("mx/1.5", report["note"])
+
+    def test_outside_or_zero_pixel_crop_is_an_error_without_output(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            output = Path(directory) / "out.png"
+            Image.new("RGB", (7, 5), color="red").save(source)
+            for arguments in ({"x": 50}, {"x": -20, "w": 5}, {"w": 0.001}):
+                with self.assertRaisesRegex(ValueError, "区域|pixel|裁剪"):
+                    server.read_region(str(source), out_path=str(output), **arguments)
+                self.assertFalse(output.exists())
+
     def exchange(self, lines):
         result = subprocess.run(
             [sys.executable, str(SERVER)], input="\n".join(lines) + "\n",

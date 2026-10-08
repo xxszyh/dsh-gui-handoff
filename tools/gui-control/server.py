@@ -483,6 +483,13 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     if not os.path.exists(image_path):
         raise FileNotFoundError(image_path)
 
+    if not out_path:
+        base, ext = os.path.splitext(image_path)
+        out_path = "%s_crop%s" % (base, ext or ".png")
+    if (os.path.normcase(os.path.realpath(image_path)) == os.path.normcase(os.path.realpath(out_path))
+            or (os.path.exists(out_path) and os.path.samefile(image_path, out_path))):
+        raise ValueError("裁剪输出不能覆盖原图；请使用新的输出路径。")
+
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("scale 必须是正的有限数")
     for value in (x, y, w, h):
@@ -499,32 +506,27 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
             return default
         return int(round(v * total)) if type(v) is float and 0.0 <= v <= 1.0 else int(round(v))
 
-    x0 = px(x, W, 0)
-    y0 = px(y, H, 0)
-    x1 = x0 + px(w, W, W - x0)
-    y1 = y0 + px(h, H, H - y0)
-
-    x0 = max(0, min(x0, W - 1))
-    y0 = max(0, min(y0, H - 1))
-    x1 = max(x0 + 1, min(x1, W))
-    y1 = max(y0 + 1, min(y1, H))
-
     try:
+        x0 = px(x, W, 0)
+        y0 = px(y, H, 0)
+        x1 = x0 + px(w, W, W - x0)
+        y1 = y0 + px(h, H, H - y0)
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(x1, W), min(y1, H)
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("裁剪区域没有覆盖原图像素。")
         crop = im.crop((x0, y0, x1, y1))
     finally:
         im.close()
-    if scale and scale != 1:
-        resized = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.LANCZOS)
-        crop.close()
-        crop = resized
-
-    if not out_path:
-        base, ext = os.path.splitext(image_path)
-        out_path = "%s_crop%s" % (base, ext or ".png")
-    d = os.path.dirname(out_path)
-    if d and not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
     try:
+        if scale != 1:
+            resized = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.LANCZOS)
+            crop.close()
+            crop = resized
+        out_size = [crop.width, crop.height]
+        effective_scale = [crop.width / (x1 - x0), crop.height / (y1 - y0)]
+        d = os.path.dirname(out_path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
         crop.save(out_path)
     finally:
         crop.close()
@@ -534,10 +536,12 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
         "src_size": [W, H],
         "region": [x0, y0, x1, y1],
         "region_size": [x1 - x0, y1 - y0],
-        "out_size": [crop.width, crop.height],
+        "out_size": out_size,
         "upscale": scale,
+        "effective_scale": effective_scale,
+        "coordinate_convention": "image_edges",
         "note": ("模型在 out_path 上给出的坐标 (mx,my) 换算回原图是："
-                 "orig_x = %d + mx/%s, orig_y = %d + my/%s" % (x0, scale, y0, scale)),
+                 "orig_x = %d + mx/%s, orig_y = %d + my/%s" % (x0, effective_scale[0], y0, effective_scale[1])),
     }, ensure_ascii=False, indent=1)
 
 

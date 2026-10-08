@@ -248,6 +248,9 @@ GUI 控制 MCP server + 抢鼠标前的倒计时提示脚本）在仓库的 `too
 2 表示用户关掉窗口取消。非 0 立即停止，不得接管。** 参考 server 不会替调用者
 启动此提示。focus_window 返回错误时停止输入；press_key 默认扫描码模式，
 少数旧程序可显式传 mode: "vk"。read_region 需要额外安装 Pillow。
+read_region 的裁剪输出须使用不同文件，保留原始截图；原图别名或无有效像素区域
+会返回错误。换算裁剪图坐标时使用 effective_scale 的实际两轴比例，不能直接用
+请求的 upscale 值。返回值采用连续图像边界坐标（image_edges）。
 
 ### 抢鼠标前必须提示
 
