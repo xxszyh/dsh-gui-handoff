@@ -28,6 +28,7 @@ gui-control —— 最小 MCP server（stdio / JSON-RPC 2.0），用于 Windows 
 import sys
 import os
 import json
+import math
 import time
 import zlib
 import struct
@@ -45,12 +46,15 @@ try:
 except Exception:
     pass
 
-user32 = ctypes.windll.user32
-gdi32 = ctypes.windll.gdi32
+if sys.platform != "win32":
+    raise SystemExit("gui-control requires Windows; use an equivalent driver on this OS.")
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.SetProcessDPIAware()  # 避免 DPI 缩放导致坐标错位
 
 SERVER_NAME = "gui-control"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.1.1"
 PROTOCOL_VERSION = "2024-11-05"
 
 PW_RENDERFULLCONTENT = 0x00000002
@@ -85,7 +89,7 @@ def _window_title(hwnd):
 
 def list_windows():
     result = []
-    proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    proto = ENUM_WINDOWS_PROC
 
     def _cb(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd):
@@ -122,6 +126,8 @@ def _write_png(path, width, height, bgra_buffer):
         这个假象极具迷惑性：看起来像"抓图把三个窗口并排了"，
         实际是我自己的编码器写错了。且它曾被误判为视觉模型在胡说。
     """
+    if width <= 0 or height <= 0 or len(bgra_buffer) != width * height * 4:
+        raise ValueError("invalid BGRA dimensions or buffer length")
     stride = width * 4
     raw = bytearray()
     for y in range(height):
@@ -150,26 +156,35 @@ def screenshot_window(hwnd, path):
     if not hwnd:
         hwnd = user32.GetForegroundWindow()
     hwnd = wt.HWND(hwnd)
-
+    if not user32.IsWindow(hwnd):
+        raise ValueError("窗口句柄无效")
     if user32.IsIconic(hwnd):
-        return ("窗口处于最小化状态，抓不到像素（这是 Windows 的限制，不是本工具的 bug）。"
-                "请先恢复窗口再截。")
+        raise ValueError("窗口处于最小化状态，请先恢复窗口再截。")
 
     r = RECT()
-    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        raise ctypes.WinError(ctypes.get_last_error())
     w, h = r.right - r.left, r.bottom - r.top
     if w <= 0 or h <= 0:
-        return "窗口尺寸无效: %dx%d" % (w, h)
+        raise ValueError("窗口尺寸无效: %dx%d" % (w, h))
 
     hdc = user32.GetWindowDC(hwnd)
-    mdc = gdi32.CreateCompatibleDC(hdc)
-    bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
-    old = gdi32.SelectObject(mdc, bmp)
+    mdc = bmp = old = None
     try:
+        if not hdc:
+            raise ctypes.WinError(ctypes.get_last_error())
+        mdc = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+        if not mdc or not bmp:
+            raise ctypes.WinError(ctypes.get_last_error())
+        old = gdi32.SelectObject(mdc, bmp)
+        if not old or old == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
         # 先 PrintWindow 试（能抓被遮挡的窗口），失败再退回 BitBlt
         ok = user32.PrintWindow(hwnd, mdc, PW_RENDERFULLCONTENT)
         if not ok:
-            gdi32.BitBlt(mdc, 0, 0, w, h, hdc, 0, 0, SRCCOPY)
+            if not gdi32.BitBlt(mdc, 0, 0, w, h, hdc, 0, 0, SRCCOPY):
+                raise ctypes.WinError(ctypes.get_last_error())
 
         bi = BITMAPINFOHEADER()
         bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
@@ -180,25 +195,55 @@ def screenshot_window(hwnd, path):
         bi.biCompression = 0
         bufsize = w * h * 4
         buf = ctypes.create_string_buffer(bufsize)
+        # GetDIBits requires the bitmap to be deselected from its DC.
+        gdi32.SelectObject(mdc, old)
+        old = None
         got = gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
-        if not got:
-            return "GetDIBits 失败"
+        if got != h:
+            raise OSError("GetDIBits 未返回完整像素行")
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
         _write_png(path, w, h, buf.raw)
     finally:
-        gdi32.SelectObject(mdc, old)
-        gdi32.DeleteObject(bmp)
-        gdi32.DeleteDC(mdc)
-        user32.ReleaseDC(hwnd, hdc)
+        if old and mdc:
+            gdi32.SelectObject(mdc, old)
+        if bmp:
+            gdi32.DeleteObject(bmp)
+        if mdc:
+            gdi32.DeleteDC(mdc)
+        if hdc:
+            user32.ReleaseDC(hwnd, hdc)
 
     return path
 
 
-def click(x, y):
-    user32.SetCursorPos(int(x), int(y))
+def _require_foreground(hwnd):
+    if hwnd is not None:
+        if not user32.IsWindow(hwnd) or user32.GetForegroundWindow() != hwnd:
+            raise OSError("目标窗口已失去焦点；未发送输入。请重新确认目标窗口。")
+
+
+def click(x, y, hwnd=None):
+    _require_foreground(hwnd)
+    if hwnd is not None:
+        hit = user32.WindowFromPoint(wt.POINT(int(x), int(y)))
+        if not hit or user32.GetAncestor(hit, 2) != hwnd:  # GA_ROOT
+            raise OSError("点击坐标不属于目标窗口；未发送输入。")
+    if not user32.SetCursorPos(int(x), int(y)):
+        raise ctypes.WinError(ctypes.get_last_error())
     time.sleep(0.05)
-    user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
-    time.sleep(0.03)
-    user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+    _require_foreground(hwnd)
+    if hwnd is not None:
+        hit = user32.WindowFromPoint(wt.POINT(int(x), int(y)))
+        if not hit or user32.GetAncestor(hit, 2) != hwnd:
+            raise OSError("点击位置已被其他窗口覆盖；未发送输入。")
+    events = []
+    for flag in (0x0002, 0x0004):  # LEFTDOWN / LEFTUP
+        event = INPUT()
+        event.type = 0  # INPUT_MOUSE
+        event.u.mi = MOUSEINPUT(0, 0, 0, flag, 0, 0)
+        events.append(event)
+    _send_input(events)
     return "已点击 (%d, %d)" % (int(x), int(y))
 
 
@@ -232,13 +277,13 @@ EXTENDED_VK = {
 
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD),
-                ("time", wt.DWORD), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+                ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
 
 
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", wt.DWORD),
                 ("dwFlags", wt.DWORD), ("time", wt.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+                ("dwExtraInfo", ctypes.c_size_t)]
 
 
 class HARDWAREINPUT(ctypes.Structure):
@@ -251,6 +296,43 @@ class _INPUTUNION(ctypes.Union):
 
 class INPUT(ctypes.Structure):
     _fields_ = [("type", wt.DWORD), ("u", _INPUTUNION)]
+
+# ctypes defaults to a 32-bit return type. HWND/HDC/HBITMAP are pointer-sized,
+# so leaving these unspecified corrupts handles on 64-bit Windows.
+ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+for dll, function, arguments, result in [
+    (user32, "EnumWindows", [ENUM_WINDOWS_PROC, wt.LPARAM], wt.BOOL),
+    (user32, "IsWindowVisible", [wt.HWND], wt.BOOL),
+    (user32, "IsWindow", [wt.HWND], wt.BOOL),
+    (user32, "IsIconic", [wt.HWND], wt.BOOL),
+    (user32, "GetWindowTextLengthW", [wt.HWND], ctypes.c_int),
+    (user32, "GetWindowTextW", [wt.HWND, wt.LPWSTR, ctypes.c_int], ctypes.c_int),
+    (user32, "GetWindowThreadProcessId", [wt.HWND, ctypes.POINTER(wt.DWORD)], wt.DWORD),
+    (user32, "GetWindowRect", [wt.HWND, ctypes.POINTER(RECT)], wt.BOOL),
+    (user32, "GetForegroundWindow", [], wt.HWND),
+    (user32, "GetWindowDC", [wt.HWND], wt.HDC),
+    (user32, "ReleaseDC", [wt.HWND, wt.HDC], ctypes.c_int),
+    (user32, "PrintWindow", [wt.HWND, wt.HDC, wt.UINT], wt.BOOL),
+    (user32, "ShowWindow", [wt.HWND, ctypes.c_int], wt.BOOL),
+    (user32, "SetForegroundWindow", [wt.HWND], wt.BOOL),
+    (user32, "SetCursorPos", [ctypes.c_int, ctypes.c_int], wt.BOOL),
+    (user32, "WindowFromPoint", [wt.POINT], wt.HWND),
+    (user32, "GetAncestor", [wt.HWND, wt.UINT], wt.HWND),
+    (user32, "SendInput", [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int], wt.UINT),
+    (user32, "MapVirtualKeyW", [wt.UINT, wt.UINT], wt.UINT),
+    (gdi32, "CreateCompatibleDC", [wt.HDC], wt.HDC),
+    (gdi32, "CreateCompatibleBitmap", [wt.HDC, ctypes.c_int, ctypes.c_int], wt.HBITMAP),
+    (gdi32, "SelectObject", [wt.HDC, wt.HANDLE], wt.HANDLE),
+    (gdi32, "DeleteObject", [wt.HANDLE], wt.BOOL),
+    (gdi32, "DeleteDC", [wt.HDC], wt.BOOL),
+    (gdi32, "BitBlt", [wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                      wt.HDC, ctypes.c_int, ctypes.c_int, wt.DWORD], wt.BOOL),
+    (gdi32, "GetDIBits", [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT, wt.LPVOID,
+                         ctypes.POINTER(BITMAPINFOHEADER), wt.UINT], ctypes.c_int),
+]:
+    bound = getattr(dll, function)
+    bound.argtypes = arguments
+    bound.restype = result
 
 
 VK = {
@@ -271,7 +353,14 @@ for _d in "0123456789":
 def _kbd(scan, flags):
     inp = INPUT()
     inp.type = INPUT_KEYBOARD
-    inp.u.ki = KEYBDINPUT(0, scan, flags, 0, None)
+    inp.u.ki = KEYBDINPUT(0, scan, flags, 0, 0)
+    return inp
+
+
+def _virtual_key(vk, flags=0):
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.u.ki = KEYBDINPUT(vk, 0, flags, 0, 0)
     return inp
 
 
@@ -286,29 +375,34 @@ def _send_input(inputs):
     if n == 0:
         return 0
     arr = (INPUT * n)(*inputs)
-    return user32.SendInput(n, ctypes.byref(arr), ctypes.sizeof(INPUT))
+    sent = user32.SendInput(n, arr, ctypes.sizeof(INPUT))
+    if sent != n:
+        raise OSError(ctypes.get_last_error(),
+                      "SendInput sent %d/%d events; input may be blocked by UIPI" % (sent, n))
+    return sent
 
 
-def type_text(text):
+def type_text(text, hwnd=None):
     """以 Unicode 码元注入文本，绕过 IME。\\n 与 \\t 按虚拟键处理。"""
     inputs = []
     for ch in text:
         if ch == "\n":
-            inputs += [_kbd(VK["enter"], 0), _kbd(VK["enter"], KEYEVENTF_KEYUP)]
+            inputs += [_virtual_key(VK["enter"]), _virtual_key(VK["enter"], KEYEVENTF_KEYUP)]
             continue
         if ch == "\t":
-            inputs += [_kbd(VK["tab"], 0), _kbd(VK["tab"], KEYEVENTF_KEYUP)]
+            inputs += [_virtual_key(VK["tab"]), _virtual_key(VK["tab"], KEYEVENTF_KEYUP)]
             continue
         raw = ch.encode("utf-16-le")
         for i in range(0, len(raw), 2):          # BMP 外字符拆成代理对
             unit = int.from_bytes(raw[i:i + 2], "little")
             inputs += [_kbd(unit, KEYEVENTF_UNICODE),
                        _kbd(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]
+    _require_foreground(hwnd)
     sent = _send_input(inputs)
     return "已注入 %d 个字符 / %d 个输入事件" % (len(text), sent)
 
 
-def press_key(combo, mode="scan"):
+def press_key(combo, mode="scan", hwnd=None):
     """按组合键：'enter' / 'ctrl+s' / 'alt+f4' / 'f5' / 'ctrl+shift+p'。
 
     mode:
@@ -318,6 +412,8 @@ def press_key(combo, mode="scan"):
       "vk"  —— 只发虚拟键码。少数老程序需要这种。
     """
     parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
+    if mode not in ("scan", "vk"):
+        raise ValueError("按键模式必须是 scan 或 vk")
     if not parts:
         raise ValueError("空按键")
     vks = []
@@ -328,7 +424,7 @@ def press_key(combo, mode="scan"):
 
     def one(vk, up):
         if mode == "vk":
-            return _kbd(vk, KEYEVENTF_KEYUP if up else 0)
+            return _virtual_key(vk, KEYEVENTF_KEYUP if up else 0)
         sc = user32.MapVirtualKeyW(vk, 0)          # MAPVK_VK_TO_VSC
         flags = KEYEVENTF_SCANCODE
         if vk in EXTENDED_VK:
@@ -338,6 +434,7 @@ def press_key(combo, mode="scan"):
         return _kbd(sc, flags)
 
     inputs = [one(vk, False) for vk in vks] + [one(vk, True) for vk in reversed(vks)]
+    _require_foreground(hwnd)
     _send_input(inputs)
     return "已按键: %s (%s 模式)" % (combo, mode)
 
@@ -345,19 +442,14 @@ def press_key(combo, mode="scan"):
 def focus_window(hwnd):
     h = wt.HWND(hwnd)
     if not user32.IsWindow(h):
-        return "句柄无效: %s" % hwnd
+        raise ValueError("句柄无效: %s" % hwnd)
     if user32.IsIconic(h):
         user32.ShowWindow(h, 9)          # SW_RESTORE
         time.sleep(0.35)
     ok = user32.SetForegroundWindow(h)
-    if not ok:
-        # 前台锁定（Windows 限制非前台进程抢焦点）时，用最小化→恢复绕过
-        user32.ShowWindow(h, 6)          # SW_MINIMIZE
-        time.sleep(0.15)
-        user32.ShowWindow(h, 9)          # SW_RESTORE
-        time.sleep(0.25)
-        ok = user32.SetForegroundWindow(h)
-    return "焦点 -> %s" % ("已设置" if ok else "可能未成功（前台锁定）")
+    if not ok or user32.GetForegroundWindow() != hwnd:
+        raise OSError("未能确认目标窗口处于前台（前台锁定）；请手动聚焦后重试。")
+    return "焦点 -> 已设置"
 
 
 # ---------------------------------------------------------------------------
@@ -385,11 +477,26 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     """
     try:
         from PIL import Image
-    except ImportError:
-        return "ERROR: 需要 Pillow（pip install pillow）才能裁剪放大"
+    except ImportError as error:
+        raise RuntimeError("需要 Pillow（pip install pillow）才能裁剪放大") from error
 
     if not os.path.exists(image_path):
-        return "ERROR: 图片不存在: %s" % image_path
+        raise FileNotFoundError(image_path)
+
+    if not out_path:
+        base, ext = os.path.splitext(image_path)
+        out_path = "%s_crop%s" % (base, ext or ".png")
+    if (os.path.normcase(os.path.realpath(image_path)) == os.path.normcase(os.path.realpath(out_path))
+            or (os.path.exists(out_path) and os.path.samefile(image_path, out_path))):
+        raise ValueError("裁剪输出不能覆盖原图；请使用新的输出路径。")
+
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("scale 必须是正的有限数")
+    for value in (x, y, w, h):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("裁剪坐标必须是有限数")
+    if (w is not None and w <= 0) or (h is not None and h <= 0):
+        raise ValueError("裁剪宽高必须为正数")
 
     im = Image.open(image_path)
     W, H = im.size
@@ -397,40 +504,44 @@ def read_region(image_path, x=None, y=None, w=None, h=None, scale=2.0, out_path=
     def px(v, total, default):
         if v is None:
             return default
-        v = float(v)
-        return int(round(v * total)) if 0.0 <= v <= 1.0 else int(round(v))
+        return int(round(v * total)) if type(v) is float and 0.0 <= v <= 1.0 else int(round(v))
 
-    x0 = px(x, W, 0)
-    y0 = px(y, H, 0)
-    x1 = x0 + px(w, W, W - x0)
-    y1 = y0 + px(h, H, H - y0)
-
-    x0 = max(0, min(x0, W - 1))
-    y0 = max(0, min(y0, H - 1))
-    x1 = max(x0 + 1, min(x1, W))
-    y1 = max(y0 + 1, min(y1, H))
-
-    crop = im.crop((x0, y0, x1, y1))
-    if scale and scale != 1:
-        crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
-
-    if not out_path:
-        base, ext = os.path.splitext(image_path)
-        out_path = "%s_crop%s" % (base, ext or ".png")
-    d = os.path.dirname(out_path)
-    if d and not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
-    crop.save(out_path)
+    try:
+        x0 = px(x, W, 0)
+        y0 = px(y, H, 0)
+        x1 = x0 + px(w, W, W - x0)
+        y1 = y0 + px(h, H, H - y0)
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(x1, W), min(y1, H)
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("裁剪区域没有覆盖原图像素。")
+        crop = im.crop((x0, y0, x1, y1))
+    finally:
+        im.close()
+    try:
+        if scale != 1:
+            resized = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.LANCZOS)
+            crop.close()
+            crop = resized
+        out_size = [crop.width, crop.height]
+        effective_scale = [crop.width / (x1 - x0), crop.height / (y1 - y0)]
+        d = os.path.dirname(out_path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        crop.save(out_path)
+    finally:
+        crop.close()
 
     return json.dumps({
         "out_path": out_path,
         "src_size": [W, H],
         "region": [x0, y0, x1, y1],
         "region_size": [x1 - x0, y1 - y0],
-        "out_size": [crop.width, crop.height],
+        "out_size": out_size,
         "upscale": scale,
+        "effective_scale": effective_scale,
+        "coordinate_convention": "image_edges",
         "note": ("模型在 out_path 上给出的坐标 (mx,my) 换算回原图是："
-                 "orig_x = %d + mx/%s, orig_y = %d + my/%s" % (x0, scale, y0, scale)),
+                 "orig_x = %d + mx/%s, orig_y = %d + my/%s" % (x0, effective_scale[0], y0, effective_scale[1])),
     }, ensure_ascii=False, indent=1)
 
 
@@ -469,6 +580,7 @@ TOOLS = [
             "properties": {
                 "x": {"type": "integer"},
                 "y": {"type": "integer"},
+                "hwnd": {"type": "integer", "description": "可选目标顶层句柄；焦点或点击目标不匹配时拒绝操作"},
             },
             "required": ["x", "y"],
             "additionalProperties": False,
@@ -489,7 +601,10 @@ TOOLS = [
         "description": "向当前焦点窗口注入文本。使用 SendInput + KEYEVENTF_UNICODE，绕过中文输入法（IME），不会把英文转成中文。支持中文与任意 Unicode。",
         "inputSchema": {
             "type": "object",
-            "properties": {"text": {"type": "string", "description": "要输入的文本；\\n 会按回车处理"}},
+            "properties": {
+                "text": {"type": "string", "description": "要输入的文本；\\n 会按回车处理"},
+                "hwnd": {"type": "integer", "description": "可选目标顶层句柄；焦点不匹配时拒绝输入"},
+            },
             "required": ["text"],
             "additionalProperties": False,
         },
@@ -516,10 +631,14 @@ TOOLS = [
     },
     {
         "name": "press_key",
-        "description": "发送组合键，如 'enter'、'ctrl+s'、'alt+f4'、'f5'、'ctrl+shift+p'。走虚拟键通道，会经过输入法，但不影响控制键。",
+        "description": "发送组合键，如 'enter'、'ctrl+s'、'alt+f4'。默认扫描码模式，可选虚拟键模式。",
         "inputSchema": {
             "type": "object",
-            "properties": {"keys": {"type": "string", "description": "按键或组合键，用 + 连接"}},
+            "properties": {
+                "keys": {"type": "string", "description": "按键或组合键，用 + 连接"},
+                "mode": {"type": "string", "enum": ["scan", "vk"], "default": "scan"},
+                "hwnd": {"type": "integer", "description": "可选目标顶层句柄；焦点不匹配时拒绝输入"},
+            },
             "required": ["keys"],
             "additionalProperties": False,
         },
@@ -528,6 +647,24 @@ TOOLS = [
 
 
 def dispatch(name, args):
+    tool = next((tool for tool in TOOLS if tool["name"] == name), None)
+    if tool is None:
+        raise ValueError("未知工具: %s" % name)
+    schema = tool["inputSchema"]
+    properties = schema["properties"]
+    if any(key not in properties for key in args):
+        raise ValueError("未知工具参数")
+    if any(key not in args for key in schema.get("required", [])):
+        raise ValueError("缺少必需工具参数")
+    for key, value in args.items():
+        expected = properties[key]["type"]
+        valid = ((expected == "string" and isinstance(value, str))
+                 or (expected == "integer" and type(value) is int)
+                 or (expected == "number" and type(value) in (int, float)))
+        if not valid or ("enum" in properties[key] and value not in properties[key]["enum"]):
+            raise ValueError("工具参数类型或取值无效: %s" % key)
+        if expected == "number" and not math.isfinite(value):
+            raise ValueError("工具数值参数必须是有限数")
     if name == "list_windows":
         return json.dumps(list_windows(), ensure_ascii=False, indent=1)
     if name == "screen_info":
@@ -540,13 +677,13 @@ def dispatch(name, args):
     if name == "screenshot_window":
         return screenshot_window(args.get("hwnd"), args["path"])
     if name == "click":
-        return click(args["x"], args["y"])
+        return click(args["x"], args["y"], args.get("hwnd"))
     if name == "focus_window":
         return focus_window(args["hwnd"])
     if name == "type_text":
-        return type_text(args["text"])
+        return type_text(args["text"], args.get("hwnd"))
     if name == "press_key":
-        return press_key(args["keys"])
+        return press_key(args["keys"], args.get("mode", "scan"), args.get("hwnd"))
     if name == "read_region":
         return read_region(
             args["image_path"],
@@ -585,15 +722,35 @@ def main():
             msg = json.loads(line)
         except Exception as e:
             _log("bad json: %s" % e)
+            _send({"jsonrpc": "2.0", "id": None,
+                   "error": {"code": -32700, "message": "parse error"}})
             continue
 
+        if (not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0"
+                or not isinstance(msg.get("method"), str)):
+            _send({"jsonrpc": "2.0", "id": None,
+                   "error": {"code": -32600, "message": "invalid request"}})
+            continue
+        if "id" not in msg:
+            # Notifications do not trigger GUI actions and never get a response.
+            if msg["method"] == "notifications/initialized":
+                _log("initialized")
+            continue
         method = msg.get("method")
         mid = msg.get("id")
+        if isinstance(mid, bool) or not isinstance(mid, (str, int, type(None))):
+            _send({"jsonrpc": "2.0", "id": None,
+                   "error": {"code": -32600, "message": "invalid request id"}})
+            continue
+        params = msg.get("params", {})
+        if not isinstance(params, dict):
+            _send({"jsonrpc": "2.0", "id": mid,
+                   "error": {"code": -32602, "message": "params must be an object"}})
+            continue
 
         if method == "initialize":
-            params = msg.get("params") or {}
             _send({"jsonrpc": "2.0", "id": mid, "result": {
-                "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             }})
@@ -602,11 +759,12 @@ def main():
         elif method == "tools/list":
             _send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
         elif method == "tools/call":
-            params = msg.get("params") or {}
             name = params.get("name")
-            args = params.get("arguments") or {}
-            _log("call %s %s" % (name, args))
+            args = params.get("arguments", {})
+            _log("call %s" % name)
             try:
+                if not isinstance(args, dict):
+                    raise ValueError("arguments must be an object")
                 text = dispatch(name, args)
                 _send({"jsonrpc": "2.0", "id": mid,
                        "result": {"content": [{"type": "text", "text": text}], "isError": False}})

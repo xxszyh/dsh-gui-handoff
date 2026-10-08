@@ -85,6 +85,69 @@ dsh plugin --profile <your-profile> add /path/to/dsh-gui-handoff
 The plugin registers one skill (`gui-handoff`, rank 600 — lowest priority, so a
 locally edited copy in your project or user skills directory always wins).
 
+### Windows driver setup and checks
+
+Python 3.11 or newer is required for the reference driver. Capture and input use
+only the standard library; the optional read_region tool requires Pillow:
+
+~~~sh
+python -m pip install Pillow
+python tools/gui-control/server.py
+~~~
+
+Configure your MCP host to launch that command with the checkout/package's
+absolute path. It speaks newline-delimited JSON-RPC on stdio; diagnostics go to
+stderr. Version 0.1.1 fixes pointer-sized Win32 handles, virtual-key Enter/Tab,
+input failure reporting, and malformed-request handling. Input arguments are
+validated before dispatch, and text to be typed is omitted from diagnostic logs.
+
+Before taking control, run the countdown notice as a separate PowerShell process.
+**Proceed only if its exit code is 0. Exit code 2 means the user cancelled.**
+The notice is not automatically invoked by this reference server; the caller
+must enforce this gate. The focus_window tool now fails if foreground focus
+cannot be confirmed, so the caller must stop rather than typing into another window.
+
+~~~powershell
+powershell.exe -NoProfile -File tools/notify-takeover.ps1 -Task 'GUI walkthrough' -Seconds 3
+if ($LASTEXITCODE -ne 0) { throw 'Takeover cancelled' }
+~~~
+
+Maintenance checks:
+
+~~~sh
+npm test
+python -m unittest discover -s tests -v
+~~~
+
+The Windows tests mock keyboard injection. Their live checks only enumerate
+windows and read cursor information; they do not click or type into your apps.
+
+For opt-in desktop acceptance, run:
+
+~~~sh
+python tools/gui-control/selftest.py --output .local/desktop-check
+~~~
+
+The packaged self-test shows the cancellable countdown itself before opening a
+disposable Tk fixture. Exit 2 means cancellation: no fixture or output is created.
+It checks native RGB capture, Chinese/emoji/newline text, virtual-key Tab,
+scancode Enter and a button click by reading fixture state. Delayed events are
+observed with bounded polling; input is never resent to make a check pass. Output
+must be a new directory. Use --capture-only to omit keyboard/mouse injection;
+that result explicitly leaves input checks untested. See
+[desktop acceptance and limitations](https://github.com/xxszyh/dsh-gui-handoff/blob/codex/gui-control-maintenance/docs/desktop-acceptance-2026-10-08.md).
+
+Input tools accept an optional hwnd. Supplying the verified top-level target
+refuses input when foreground focus differs; click also verifies that its position
+belongs to that window before and after moving the cursor. These checks reduce
+stale-focus mistakes; they do not lock foreground focus against concurrent changes.
+read_region treats integers as pixels and floats from 0 to 1 as fractions, and
+returns an MCP error for missing images/dependencies or invalid geometry.
+It refuses to overwrite the source image, including hardlink/path aliases, and
+rejects regions with no source pixels. For non-integer resizing, effective_scale
+reports each axis's actual output/source ratio; coordinate mapping uses those
+ratios rather than the requested upscale value.
+
 ### What ships
 
 ```
@@ -92,6 +155,7 @@ lib/index.js                     skill provider (no runtime dependencies)
 cordis.patch.yml                 bundle manifest
 skills/gui-handoff/SKILL.md      the skill itself
 tools/gui-control/server.py      reference GUI-control MCP server (Windows)
+tools/gui-control/selftest.py    opt-in native desktop acceptance (Windows + Tk)
 tools/notify-takeover.ps1        countdown notice shown before taking the mouse
 ```
 
@@ -179,6 +243,38 @@ dsh plugin --profile <你的 profile> add /path/to/dsh-gui-handoff
 插件注册一个 skill（`gui-handoff`，rank 600 —— 最低优先级，因此你在项目或用户
 技能目录里本地改过的同名副本总是优先）。
 
+### Windows 工具维护
+
+参考驱动需要 Python 3.11+；截图和输入使用标准库，read_region 另需安装 Pillow。
+控制工具和提示脚本现已包含在安装包中。
+
+0.1.1 修复了 64 位窗口句柄、回车/Tab 注入、输入失败误报成功、异常请求导致
+服务退出等问题。自动化调用者必须先运行接管提示，**只有退出码 0 才能继续；
+退出码 2 表示用户取消**。参考 server 不会自动启动提示，需要调用者执行此检查。
+聚焦目标窗口失败时工具会报错，调用者应停止输入。
+
+运行 npm test 检查插件与安装包；Windows 上再运行
+python -m unittest discover -s tests -v 检查协议、按键结构与 PNG。
+测试不会向桌面注入按键或点击鼠标。
+
+真实桌面验收另行显式运行：
+
+~~~sh
+python tools/gui-control/selftest.py --output .local/desktop-check
+~~~
+
+自测会先显示可取消的倒计时，再打开专用临时 Tk 窗口；取消返回 2，不启动测试
+窗口、不创建输出。它通过窗口自身状态核验中文/emoji/换行、Tab、扫描码回车和
+点击，通过像素核验截图。输入稍晚生效时只等待状态，不重复发送。输出目录必须
+不存在；--capture-only 明确跳过键鼠验收，不能当作输入已通过。
+
+给输入工具传入已核实的 hwnd，可在焦点不匹配时拒绝操作；点击还会检查坐标是否
+属于目标窗口。核对与注入之间仍可能发生焦点变化，不是前台锁。read_region 的
+整数表示像素、0～1 浮点数表示比例，缺图、依赖缺失和非法参数均按工具错误返回。
+裁剪拒绝覆盖原图（含路径及硬链接别名），完全越界或不足一像素的区域也会报错。
+非整数缩放应使用 effective_scale 的实际两轴比例换算坐标，upscale 仍记录请求值。
+见[裁剪修复与验收](https://github.com/xxszyh/dsh-gui-handoff/blob/codex/gui-control-maintenance/docs/crop-coordinate-maintenance-2026-10-08.md)。
+
 ### 目录
 
 ```
@@ -186,6 +282,7 @@ lib/index.js                     skill provider（无运行时依赖）
 cordis.patch.yml                 bundle 清单
 skills/gui-handoff/SKILL.md      skill 本体
 tools/gui-control/server.py      参考用的 GUI 控制 MCP server（Windows）
+tools/gui-control/selftest.py    显式运行的真实桌面自测（Windows + Tk）
 tools/notify-takeover.ps1        抢鼠标前的倒计时提示
 ```
 
